@@ -15,6 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # Add a build_type matrix to build both Debug and Release
+        build_type: [Debug, Release]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install Go
@@ -54,26 +56,31 @@ jobs:
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             sed -i 's/-Werror//g' CMakeLists.txt
           fi
-          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/boringssl-install
-          cmake --build build --config Release
-          cmake --install build
+          # Configure for the specific build type (Debug or Release)
+          cmake -S . -B build-${{ matrix.build_type }} -G "Ninja" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/boringssl-install-${{ matrix.build_type }}
+          # Build the specified configuration
+          cmake --build build-${{ matrix.build_type }} --config ${{ matrix.build_type }}
+          # Install to a directory unique to the build type
+          cmake --install build-${{ matrix.build_type }}
         shell: bash
 
       - name: Build and Install BoringSSL (Windows)
         if: runner.os == 'Windows'
-        # FIX: Use PowerShell for Windows builds for better path handling
         shell: pwsh
         run: |
           cd boringssl
-          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/boringssl-install"
-          cmake --build build --config Release
-          cmake --install build
+          # Configure for the specific build type (Debug or Release)
+          cmake -S . -B build-${{ matrix.build_type }} -G "Ninja" -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/boringssl-install-${{ matrix.build_type }}"
+          # Build the specified configuration
+          cmake --build build-${{ matrix.build_type }} --config ${{ matrix.build_type }}
+          # Install to a directory unique to the build type
+          cmake --install build-${{ matrix.build_type }}
 
-      # This is a crucial debugging step to ensure the installation was successful
       - name: Verify Installation Contents
         shell: pwsh
         run: |
-          $install_path = "${{ github.workspace }}/boringssl-install"
+          # Verify the installation directory for the specific build type
+          $install_path = "${{ github.workspace }}/boringssl-install-${{ matrix.build_type }}"
           if (-not (Test-Path $install_path)) {
             Write-Error "Installation directory '$install_path' does not exist."
             exit 1
@@ -90,5 +97,7 @@ jobs:
       - name: Upload BoringSSL Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: boringssl-build-${{ runner.os }}
-          path: ${{ github.workspace }}/boringssl-install
+          # Create a unique artifact name for each OS and build type combination
+          name: boringssl-build-${{ runner.os }}-${{ matrix.build_type }}
+          # Upload the specific build type's installation directory
+          path: ${{ github.workspace }}/boringssl-install-${{ matrix.build_type }}
