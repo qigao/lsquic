@@ -56,10 +56,12 @@ jobs:
       - name: Package BoringSSL Artifact
         shell: pwsh
         run: |
+          # FIX: Use a relative path to avoid mixed path separators on Windows.
+          $sourcePath = "./boringssl-install"
           if ("${{ runner.os }}" -eq "Windows") {
-            Compress-Archive -Path ${{ github.workspace }}/boringssl-install -DestinationPath boringssl.zip
+            Compress-Archive -Path $sourcePath -DestinationPath boringssl.zip
           } else {
-            tar -czf boringssl.tar.gz -C ${{ github.workspace }}/boringssl-install .
+            tar -czf boringssl.tar.gz -C $sourcePath .
           }
 
       - name: Upload BoringSSL Artifact
@@ -133,7 +135,6 @@ jobs:
         working-directory: ${{ github.workspace }}/lsquic
         run: |
           git submodule update --init --recursive
-          # Point BORINGSSL_DIR to the clean, downloaded artifact directory
           cmake -S . -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DBORINGSSL_DIR=${{ github.workspace }}/boringssl-install `
@@ -151,7 +152,6 @@ jobs:
           Copy-Item -Path "${{ github.workspace }}/lsquic/build/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/lsquic/build/bin/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/lsquic/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
-          # Copy dependencies from vcpkg and the reused BoringSSL artifact
           Copy-Item -Path "${{ github.workspace }}/boringssl-install/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/boringssl-install/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
