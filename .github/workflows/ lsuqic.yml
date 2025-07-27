@@ -1,4 +1,4 @@
-name: Build LSQUIC Release
+name: Build LSQUIC with BoringSSL
 
 on:
   push:
@@ -8,130 +8,133 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
+    # Do not cancel other jobs in the matrix if one fails
     strategy:
-      # Don't cancel all jobs if one fails
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             triplet: x64-linux
-            vcpkg_static_triplet: x64-linux
+            # On Linux/macOS, static dependencies are the default with vcpkg
+            vcpkg_triplet: x64-linux
           - os: windows-latest
             triplet: x64-windows
-            vcpkg_static_triplet: x64-windows-static # Use static triplet for dependencies on Windows
+            # On Windows, we must be explicit about static linking for dependencies
+            vcpkg_triplet: x64-windows-static
           - os: macos-latest
             triplet: x64-osx
-            vcpkg_static_triplet: x64-osx
+            vcpkg_triplet: x64-osx
+
+    runs-on: ${{ matrix.os }}
 
     steps:
-    - name: Checkout repository and submodules
+    - name: Print Runner Information
+      run: |
+        echo "Runner OS: ${{ runner.os }}"
+        echo "Vcpkg Triplet: ${{ matrix.vcpkg_triplet }}"
+        echo "Event: ${{ github.event_name }}"
+      shell: bash
+
+    - name: Checkout LSQUIC repository and submodules
       uses: actions/checkout@v4
       with:
         submodules: 'recursive'
 
-    - name: Install build dependencies (Linux)
+    - name: Install Go (for BoringSSL)
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Install Build Tools (Linux)
       if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential ninja-build
-      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-    - name: Install build dependencies (macOS)
+    - name: Install Build Tools (macOS)
       if: runner.os == 'macOS'
-      run: |
-        brew install ninja
-      shell: bash
+      run: brew install ninja
 
-    - name: Cache vcpkg
+    - name: Cache vcpkg artifacts
       id: cache-vcpkg
       uses: actions/cache@v4
       with:
-        path: |
-          ${{ github.workspace }}/vcpkg
-        key: ${{ runner.os }}-vcpkg-cache-${{ matrix.triplet }}-${{ hashFiles('**/CMakeLists.txt') }}
+        path: ${{ github.workspace }}/vcpkg/installed
+        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-vcpkg-${{ hashFiles('**/CMakeLists.txt') }}
 
-    - name: Install vcpkg (if cache miss)
-      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+    - name: Bootstrap vcpkg
       run: |
         git clone https://github.com/microsoft/vcpkg.git
         cd vcpkg
         ./bootstrap-vcpkg.sh -disableMetrics
       shell: bash
+      if: runner.os != 'Windows'
 
-    - name: Install vcpkg (Windows, if cache miss)
-      if: runner.os == 'Windows' && steps.cache-vcpkg.outputs.cache-hit != 'true'
+    - name: Bootstrap vcpkg (Windows)
       run: |
         git clone https://github.com/microsoft/vcpkg.git
         cd vcpkg
-        .\bootstrap-vcpkg.bat -disableMetrics
-      shell: pwsh
+        ./bootstrap-vcpkg.bat -disableMetrics
+      shell: cmd
+      if: runner.os == 'Windows'
 
-    - name: Install vcpkg Dependencies
+    - name: Install zlib and libevent via vcpkg
       run: |
-        ./vcpkg/vcpkg install zlib:${{ matrix.vcpkg_static_triplet }}
-        ./vcpkg/vcpkg install libevent:${{ matrix.vcpkg_static_triplet }}
-        ./vcpkg/vcpkg install pcre:${{ matrix.vcpkg_static_triplet }}
-        ./vcpkg/vcpkg install getopt:${{ matrix.triplet }}
+        vcpkg/vcpkg install zlib:${{ matrix.vcpkg_triplet }}
+        vcpkg/vcpkg install libevent:${{ matrix.vcpkg_triplet }}
       shell: bash
 
-    - name: Build BoringSSL (Linux/macOS)
-      if: runner.os != 'Windows'
+    - name: Build BoringSSL from source
       run: |
         git clone https://boringssl.googlesource.com/boringssl
         cd boringssl
-        git checkout cf8d3ad3cea51cf7184307d54f465da62b7d8408
+        # Use the specific, stable commit for BoringSSL
+        git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
+        # Configure and build BoringSSL
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
         cmake --build build --config Release
       shell: bash
 
-    - name: Build BoringSSL (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        git clone https://boringssl.googlesource.com/boringssl
-        cd boringssl
-        git checkout cf8d3ad3cea51cf7184307d54f465da62b7d8408
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOPENSSL_NO_ASM=1
-        cmake --build build --config Release
-      shell: pwsh
-
-    - name: Configure and Build LSQUIC
+    - name: Configure and Build LSQUIC (Static Release)
       run: |
         cmake -S . -B build -G "Ninja" `
           -DCMAKE_BUILD_TYPE=Release `
-          -DBUILD_SHARED_LIBS=OFF `
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_static_triplet }} `
+          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
         cmake --build build --config Release
       shell: pwsh
 
-    - name: Package Artifacts
+    - name: Package Build Artifacts
       shell: pwsh
       run: |
-        $artifactDir = "lsquic-release-${{ matrix.triplet }}"
-        New-Item -ItemType Directory -Path $artifactDir/lib -Force
-        New-Item -ItemType Directory -Path $artifactDir/include -Force
-        New-Item -ItemType Directory -Path $artifactDir/bin -Force
+        $artifactDir = "lsquic-dist-${{ matrix.triplet }}"
+        New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
+        New-Item -ItemType Directory -Path "$artifactDir/include" -Force
 
-        # Copy LSQUIC, BoringSSL, and vcpkg libraries and headers
-        Copy-Item -Path "build/bin/*lsquic*" -Destination "$artifactDir/lib/" -Recurse -Force -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/lib/*lsquic*" -Destination "$artifactDir/lib/" -Recurse -Force -ErrorAction SilentlyContinue
-        Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/" -Recurse -Force
-        Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/" -Recurse -Force
-        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_static_triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -Force
-        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_static_triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -Force -ErrorAction SilentlyContinue
+        # Copy LSQUIC headers
+        Copy-Item -Path "include/*" -Destination "$artifactDir/include/" -Recurse
 
-        # Compress artifacts
+        # Copy LSQUIC library
+        Copy-Item -Path "build/lib/*lsquic*" -Destination "$artifactDir/lib/"
+
+        # Copy BoringSSL libraries and headers
+        Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/"
+        Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/"
+        Copy-Item -Path "boringssl/include/*" -Destination "$artifactDir/include/" -Recurse
+
+        # Copy Zlib and Libevent libraries and headers from vcpkg
+        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_triplet }}/lib/*" -Destination "$artifactDir/lib/"
+        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse
+
+        # Compress the final package
         if ("${{ runner.os }}" -eq "Windows") {
           Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip"
         } else {
           tar -czf "${artifactDir}.tar.gz" -C $artifactDir .
         }
 
-    - name: Upload Artifacts
+    - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: lsquic-release-${{ runner.os }}-${{ matrix.triplet }}
-        path: lsquic-release-${{ matrix.triplet }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+        path: lsquic-dist-${{ matrix.triplet }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
         retention-days: 7
