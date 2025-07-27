@@ -40,23 +40,53 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build and Install BoringSSL
+      - name: Clone BoringSSL Repository
         run: |
           git clone https://boringssl.googlesource.com/boringssl.git
           cd boringssl
-          # Using a known-good commit for stability
           git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-          # Remove -Werror on Linux to prevent build failures on newer compilers
+        shell: bash
+
+      - name: Build and Install BoringSSL (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd boringssl
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             sed -i 's/-Werror//g' CMakeLists.txt
           fi
-          # Configure, build, and install BoringSSL
           cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/boringssl-install
           cmake --build build --config Release
           cmake --install build
         shell: bash
 
-      # This step uploads the final build results from the 'boringssl-install' directory
+      - name: Build and Install BoringSSL (Windows)
+        if: runner.os == 'Windows'
+        # FIX: Use PowerShell for Windows builds for better path handling
+        shell: pwsh
+        run: |
+          cd boringssl
+          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/boringssl-install"
+          cmake --build build --config Release
+          cmake --install build
+
+      # This is a crucial debugging step to ensure the installation was successful
+      - name: Verify Installation Contents
+        shell: pwsh
+        run: |
+          $install_path = "${{ github.workspace }}/boringssl-install"
+          if (-not (Test-Path $install_path)) {
+            Write-Error "Installation directory '$install_path' does not exist."
+            exit 1
+          }
+          $item_count = (Get-ChildItem -Path $install_path -Recurse | Measure-Object).Count
+          Write-Host "Found $item_count items in '$install_path'"
+          if ($item_count -eq 0) {
+            Write-Error "Installation directory is empty. Build may have failed."
+            exit 1
+          }
+          # List the top-level contents for visual confirmation in logs
+          Get-ChildItem -Path $install_path
+
       - name: Upload BoringSSL Artifact
         uses: actions/upload-artifact@v4
         with:
