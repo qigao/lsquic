@@ -45,14 +45,14 @@ jobs:
       if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Clone Required Repositories
+    - name: Clone All Repositories
       run: |
         git clone https://github.com/litespeedtech/lsquic.git
-        git clone https://boringssl.googlesource.com/boringssl
+        git clone https://boringssl.googlesource.com/boringssl.git
         git clone https://github.com/microsoft/vcpkg.git
       shell: bash
 
-    - name: Bootstrap vcpkg
+    - name: Bootstrap and Install vcpkg Dependencies
       working-directory: ${{ github.workspace }}/vcpkg
       run: |
         if [[ "${{ runner.os }}" == "Windows" ]]; then
@@ -60,17 +60,17 @@ jobs:
         else
           ./bootstrap-vcpkg.sh -disableMetrics
         fi
+        # Install getopt for all platforms, and the other dependencies
+        ./vcpkg install getopt:${{ matrix.triplet }}
+        ./vcpkg install zlib:${{ matrix.triplet }}
+        ./vcpkg install libevent:${{ matrix.triplet }}
       shell: bash
 
-    - name: Install Dependencies via vcpkg
-      working-directory: ${{ github.workspace }}/vcpkg
-      run: ./vcpkg install zlib:${{ matrix.triplet }} libevent:${{ matrix.triplet }}
-      shell: bash
-
-    - name: Build BoringSSL from Source
+    - name: Build BoringSSL
       working-directory: ${{ github.workspace }}/boringssl
       run: |
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
+        # On Linux, patch CMakeLists.txt to remove "-Werror"
         if [[ "${{ runner.os }}" == "Linux" ]]; then
           sed -i 's/-Werror//g' CMakeLists.txt
         fi
@@ -78,39 +78,18 @@ jobs:
         cmake --build build --config Release
       shell: bash
 
-    - name: Configure and Build LSQUIC (Linux/macOS)
-      if: runner.os != 'Windows'
+    - name: Configure and Build LSQUIC
       working-directory: ${{ github.workspace }}/lsquic
       run: |
         git submodule update --init --recursive
-        # FIX: Provide BOTH the high-level BORINGSSL_DIR and the specific library/include paths for maximum compatibility.
+        # FIX: Provide BORINGSSL_DIR and the vcpkg toolchain file. This is the correct combination.
         cmake -S . -B build -G "Ninja" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
-          -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl/include `
-          -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl/build/crypto/libcrypto.a `
-          -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl/build/ssl/libssl.a `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
         cmake --build build --config Release
       shell: bash
-
-    - name: Configure and Build LSQUIC (Windows)
-      if: runner.os == 'Windows'
-      working-directory: ${{ github.workspace }}/lsquic
-      shell: pwsh
-      run: |
-        git submodule update --init --recursive
-        # FIX: Provide BOTH the high-level BORINGSSL_DIR and the specific library/include paths for maximum compatibility.
-        cmake -S . -B build -G "Ninja" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
-          -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl/include `
-          -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl/build/crypto/crypto.lib `
-          -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl/build/ssl/ssl.lib `
-          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-        cmake --build build --config Release
 
     - name: Package Build Artifacts
       shell: pwsh
