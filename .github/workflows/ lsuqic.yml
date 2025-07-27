@@ -71,23 +71,45 @@ jobs:
       working-directory: ${{ github.workspace }}/boringssl
       run: |
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-
-        # This is the definitive fix for the "all warnings being treated as errors" issue.
         if [[ "${{ runner.os }}" == "Linux" ]]; then
           sed -i 's/-Werror//g' CMakeLists.txt
         fi
-
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
         cmake --build build --config Release
       shell: bash
 
-    - name: Configure and Build LSQUIC
+    - name: Configure and Build LSQUIC (Linux/macOS)
+      if: runner.os != 'Windows'
       working-directory: ${{ github.workspace }}/lsquic
       run: |
         git submodule update --init --recursive
-        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBORINGSSL_DIR=${{ github.workspace }}/boringssl -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+        # FIX: Explicitly provide the full paths to the BoringSSL libraries and includes
+        cmake -S . -B build -G "Ninja" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl/include `
+          -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl/build/crypto/libcrypto.a `
+          -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl/build/ssl/libssl.a `
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
         cmake --build build --config Release
       shell: bash
+
+    - name: Configure and Build LSQUIC (Windows)
+      if: runner.os == 'Windows'
+      working-directory: ${{ github.workspace }}/lsquic
+      # FIX: Use PowerShell on Windows to correctly handle paths and the MSVC environment
+      shell: pwsh
+      run: |
+        git submodule update --init --recursive
+        # FIX: Explicitly provide the full paths to the BoringSSL libraries and includes
+        cmake -S . -B build -G "Ninja" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl/include `
+          -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl/build/crypto/crypto.lib `
+          -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl/build/ssl/ssl.lib `
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+        cmake --build build --config Release
 
     - name: Package Build Artifacts
       shell: pwsh
