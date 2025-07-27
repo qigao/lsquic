@@ -1,4 +1,4 @@
-name: Build BoringSSL then LSQUIC
+name: Build BoringSSL
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   # =============================================
-  #  JOB 1: Build and Archive BoringSSL
+  #  JOB: Build and Archive BoringSSL
   # =============================================
   build-boringssl:
     strategy:
@@ -21,7 +21,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-      - name: Install Build Tools and NASM
+
+      - name: Install Build Tools and NASM (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
@@ -30,9 +31,11 @@ jobs:
             brew install git ninja nasm
           fi
         shell: bash
+
       - name: Install NASM (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
+
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -43,132 +46,19 @@ jobs:
           cd boringssl
           # Using a known-good commit for stability
           git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
+          # Remove -Werror on Linux to prevent build failures on newer compilers
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Remove -Werror to prevent build failures on newer compilers
             sed -i 's/-Werror//g' CMakeLists.txt
           fi
+          # Configure, build, and install BoringSSL
           cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/boringssl-install
           cmake --build build --config Release
           cmake --install build
         shell: bash
 
+      # This step uploads the final build results from the 'boringssl-install' directory
       - name: Upload BoringSSL Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: boringssl-artifact-${{ runner.os }}
+          name: boringssl-build-${{ runner.os }}
           path: ${{ github.workspace }}/boringssl-install
-
-  # ==================================================
-  #  JOB 2: Build LSQUIC using the BoringSSL Artifact
-  # ==================================================
-  build-lsquic:
-    needs: build-boringssl
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            triplet: x64-linux
-          - os: windows-latest
-            triplet: x64-windows-static
-          - os: macos-latest
-            triplet: x64-osx
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Install Build Tools
-        if: runner.os != 'Windows'
-        run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo apt-get update && sudo apt-get install -y git ninja-build
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            brew install git ninja
-          fi
-        shell: bash
-      - name: Setup MSVC (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Download BoringSSL Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: boringssl-artifact-${{ runner.os }}
-          path: boringssl-install
-
-      - name: Clone LSQUIC and vcpkg
-        run: |
-          git clone https://github.com/litespeedtech/lsquic.git
-          git clone https://github.com/microsoft/vcpkg.git
-        shell: bash
-
-      - name: Bootstrap and Install vcpkg Dependencies
-        working-directory: ${{ github.workspace }}/vcpkg
-        run: |
-          ./bootstrap-vcpkg.sh -disableMetrics
-          ./vcpkg install getopt:${{ matrix.triplet }} zlib:${{ matrix.triplet }} libevent:${{ matrix.triplet }}
-        if: runner.os != 'Windows'
-        shell: bash
-      - name: Bootstrap and Install vcpkg Dependencies (Windows)
-        working-directory: ${{ github.workspace }}/vcpkg
-        run: |
-          ./bootstrap-vcpkg.bat -disableMetrics
-          ./vcpkg install getopt:${{ matrix.triplet }} zlib:${{ matrix.triplet }} libevent:${{ matrix.triplet }}
-        if: runner.os == 'Windows'
-        shell: cmd
-
-      - name: Configure and Build LSQUIC (Linux/macOS)
-        if: runner.os != 'Windows'
-        working-directory: ${{ github.workspace }}/lsquic
-        run: |
-          git submodule update --init --recursive
-          # FIX: Simplify CMake arguments. LSQUIC's find script can locate
-          # the necessary files using just the BORINGSSL_DIR variable.
-          cmake -S . -B build -G "Ninja" `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DBORINGSSL_DIR=${{ github.workspace }}/boringssl-install `
-            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          cmake --build build --config Release
-        shell: bash
-
-      - name: Configure and Build LSQUIC (Windows)
-        if: runner.os == 'Windows'
-        working-directory: ${{ github.workspace }}/lsquic
-        shell: pwsh
-        run: |
-          git submodule update --init --recursive
-          # FIX: Provide every possible variable, with Windows library names.
-          cmake -S . -B build -G "Ninja" `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DBORINGSSL_DIR="${{ github.workspace }}/boringssl-install" `
-            -DBORINGSSL_INCLUDE_DIR="${{ github.workspace }}/boringssl-install/include" `
-            -DBORINGSSL_LIB_crypto="${{ github.workspace }}/boringssl-install/lib/crypto.lib" `
-            -DBORINGSSL_LIB_ssl="${{ github.workspace }}/boringssl-install/lib/ssl.lib" `
-            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}"
-          cmake --build build --config Release
-
-      - name: Package Final LSQUIC Artifacts
-        shell: pwsh
-        run: |
-          $artifactDir = "lsquic-dist-${{ matrix.triplet }}"
-          New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
-          New-Item -ItemType Directory -Path "$artifactDir/include" -Force
-          # Copy binaries and libraries from the LSQUIC build
-          Copy-Item -Path "${{ github.workspace }}/lsquic/build/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
-          Copy-Item -Path "${{ github.workspace }}/lsquic/build/bin/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
-          # Copy public headers from LSQUIC source
-          Copy-Item -Path "${{ github.workspace }}/lsquic/include/*" -Destination "$artifactDir/include/" -Recurse
-          # Copy BoringSSL libraries and headers
-          Copy-Item -Path "${{ github.workspace }}/boringssl-install/lib/*" -Destination "$artifactDir/lib/" -Recurse
-          Copy-Item -Path "${{ github.workspace }}/boringssl-install/include/*" -Destination "$artifactDir/include/" -Recurse
-          # Copy vcpkg dependency libraries and headers
-          Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
-          Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse
-          
-          Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip" -Force
-
-      - name: Upload Final LSQUIC Release Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lsquic-release-${{ matrix.triplet }}
-          path: lsquic-dist-${{ matrix.triplet }}.zip
