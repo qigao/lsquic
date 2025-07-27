@@ -56,9 +56,10 @@ jobs:
       - name: Package BoringSSL Artifact
         shell: pwsh
         run: |
-          # FIX: Use a relative path to avoid mixed path separators on Windows.
-          $sourcePath = "./boringssl-install"
+          # to create a path string that Compress-Archive understands perfectly.
+          $sourcePath = "${{ github.workspace }}/boringssl-install"
           if ("${{ runner.os }}" -eq "Windows") {
+            $sourcePath = $sourcePath.Replace('/', '\')
             Compress-Archive -Path $sourcePath -DestinationPath boringssl.zip
           } else {
             tar -czf boringssl.tar.gz -C $sourcePath .
