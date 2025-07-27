@@ -27,11 +27,6 @@ jobs:
       with:
         submodules: 'recursive'
 
-    - name: Install Go (for BoringSSL build)
-      uses: actions/setup-go@v5
-      with:
-        go-version: 'stable'
-
     - name: Install Build Tools (Linux/macOS)
       if: runner.os != 'Windows'
       run: |
