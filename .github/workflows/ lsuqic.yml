@@ -25,22 +25,22 @@ jobs:
     - name: Checkout LSQUIC Repository and Submodules
       uses: actions/checkout@v4
       with:
-        path: lsquic # Checkout into a specific 'lsquic' subdirectory
+        submodules: 'recursive'
 
     - name: Install Go (for BoringSSL build)
       uses: actions/setup-go@v5
       with:
         go-version: 'stable'
 
-    - name: Install Build Tools (Linux/macOS)
-      if: runner.os != 'Windows'
+    - name: Install Build Tools and NASM
       run: |
         if [[ "${{ runner.os }}" == "Linux" ]]; then
-          sudo apt-get update && sudo apt-get install -y ninja-build
+          sudo apt-get update && sudo apt-get install -y ninja-build nasm
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
-          brew install ninja
+          brew install ninja nasm
         fi
       shell: bash
+      if: runner.os != 'Windows'
 
     - name: Install NASM (Windows)
       if: runner.os == 'Windows'
@@ -60,50 +60,54 @@ jobs:
           ./bootstrap-vcpkg.sh -disableMetrics
         fi
       shell: bash
-      working-directory: ${{ github.workspace }}
 
     - name: Install Dependencies via vcpkg
       run: ./vcpkg/vcpkg install zlib:${{ matrix.triplet }} libevent:${{ matrix.triplet }}
       shell: bash
-      working-directory: ${{ github.workspace }}
 
     - name: Build BoringSSL from Source
       run: |
         git clone https://boringssl.googlesource.com/boringssl
+        # FIX: Build from within the boringssl directory
         cd boringssl
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-        # FIX: Disable tests to prevent the gcc warning from failing the build. This is the definitive fix.
+        # FIX: Disabling tests is the definitive way to prevent the Ubuntu compiler error
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
         cmake --build build --config Release
       shell: bash
-      working-directory: ${{ github.workspace }}
 
     - name: Configure and Build LSQUIC
-      working-directory: ${{ github.workspace }}/lsquic
       run: |
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBORINGSSL_DIR=${{ github.workspace }}/boringssl -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
         cmake --build build --config Release
       shell: bash
 
     - name: Package Build Artifacts
-      working-directory: ${{ github.workspace }}/lsquic
       shell: pwsh
       run: |
         $artifactDir = "lsquic-dist-${{ matrix.triplet }}"
-        New-Item -ItemType Directory -Path $artifactDir -Force
-        Move-Item -Path "build" -Destination $artifactDir/build
-        Move-Item -Path "${{ github.workspace }}/boringssl" -Destination $artifactDir/boringssl
-        Move-Item -Path "${{ github.workspace }}/vcpkg/installed" -Destination $artifactDir/vcpkg_installed
+        New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
+        New-Item -ItemType Directory -Path "$artifactDir/include" -Force
+
+        # Copy all build outputs to the artifact directory
+        Copy-Item -Path "build/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/bin/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue # For Windows DLLs
+        Copy-Item -Path "include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
 
         if ("${{ runner.os }}" -eq "Windows") {
-          Compress-Archive -Path $artifactDir -DestinationPath "${{ github.workspace }}/${artifactDir}.zip"
+          Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip"
         } else {
-          tar -czf "${{ github.workspace }}/${artifactDir}.tar.gz" -C . $artifactDir
+          tar -czf "${artifactDir}.tar.gz" -C $artifactDir .
         }
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: lsquic-release-${{ runner.os }}-${{ matrix.triplet }}
-        path: ${{ github.workspace }}/lsquic-dist-${{ matrix.triplet }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+        path: lsquic-dist-${{ matrix.triplet }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
         retention-days: 7
