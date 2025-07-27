@@ -27,6 +27,11 @@ jobs:
       with:
         submodules: 'recursive'
 
+    - name: Install Go (for BoringSSL build)
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+
     - name: Install Build Tools (Linux/macOS)
       if: runner.os != 'Windows'
       run: |
@@ -37,6 +42,10 @@ jobs:
         fi
       shell: bash
 
+    - name: Install NASM (Windows)
+      if: runner.os == 'Windows'
+      uses: ilammy/setup-nasm@v1
+
     - name: Setup MSVC Developer Command Prompt (Windows)
       if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
@@ -46,7 +55,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/vcpkg
-        key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-cache-v2
+        key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-cache-v3
 
     - name: Bootstrap vcpkg
       if: steps.cache-vcpkg.outputs.cache-hit != 'true'
@@ -66,25 +75,27 @@ jobs:
         ./vcpkg/vcpkg install libevent:${{ matrix.triplet }}
       shell: bash
 
-    - name: Build BoringSSL from Source (Disable Tests)
+    - name: Build BoringSSL from Source
       run: |
         git clone https://boringssl.googlesource.com/boringssl
         cd boringssl
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-        # FIX: Disable tests with -DBUILD_TESTING=OFF to prevent the gcc warning from failing the build.
-        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+        # FIX: Explicitly disable -Werror for the BoringSSL build on Linux
+        if [[ "${{ runner.os }}" == "Linux" ]]; then
+          export CXXFLAGS="-Wno-error"
+        fi
+        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
         cmake --build build --config Release
       shell: bash
 
     - name: Configure and Build LSQUIC
-      # FIX: Use bash shell for all OSes for command consistency.
-      # FIX: Use single-line, explicit commands to avoid syntax errors.
       run: |
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBORINGSSL_DIR=${{ github.workspace }}/boringssl -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
         cmake --build build --config Release
       shell: bash
 
     - name: Package Build Artifacts
+      shell: pwsh
       run: |
         $artifactDir = "lsquic-dist-${{ matrix.triplet }}"
         New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
@@ -92,7 +103,7 @@ jobs:
 
         Copy-Item -Path "include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
         Copy-Item -Path "build/lib/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/bin/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue # For Windows DLLs
+        Copy-Item -Path "build/bin/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
         Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
         Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
         Copy-Item -Path "boringssl/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
@@ -104,7 +115,6 @@ jobs:
         } else {
           tar -czf "${artifactDir}.tar.gz" -C $artifactDir .
         }
-      shell: pwsh
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
