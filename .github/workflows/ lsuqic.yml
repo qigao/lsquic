@@ -8,61 +8,130 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel all jobs if one fails
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triplet: x64-linux
+            vcpkg_static_triplet: x64-linux
+          - os: windows-latest
+            triplet: x64-windows
+            vcpkg_static_triplet: x64-windows-static # Use static triplet for dependencies on Windows
+          - os: macos-latest
+            triplet: x64-osx
+            vcpkg_static_triplet: x64-osx
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - name: Checkout repository and submodules
+      uses: actions/checkout@v4
       with:
         submodules: 'recursive'
 
-    - name: Set up vcpkg
-      uses: lukka/run-vcpkg@v11
-      with:
-        vcpkgDirectory: ${{ runner.workspace }}/vcpkg
-        runVcpkgInstall: true
-
-    - name: Install Dependencies with vcpkg
+    - name: Install build dependencies (Linux)
+      if: runner.os == 'Linux'
       run: |
-        vcpkg install zlib:x64-windows-static
-        vcpkg install libevent:x64-windows-static
-        vcpkg install pcre:x64-windows-static
-        vcpkg install getopt:x64-windows
-        vcpkg integrate install
-      shell: cmd
+        sudo apt-get update
+        sudo apt-get install -y build-essential ninja-build
+      shell: bash
 
-    - name: Cache vcpkg dependencies
-      uses: actions/cache@v3
-      with:
-        path: ${{ runner.workspace }}/vcpkg/installed
-        key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/vcpkg.json') }}
-        restore-keys: |
-          ${{ runner.os }}-vcpkg-
-
-    - name: Build BoringSSL
+    - name: Install build dependencies (macOS)
+      if: runner.os == 'macOS'
       run: |
-        if (Test-Path -Path ".\boringssl\CMakeLists.txt") {
-          echo "BoringSSL is cached"
-        } else {
-          git clone https://boringssl.googlesource.com/boringssl
-          cd boringssl
-          git checkout cf8d3ad3cea51cf7184307d54f465da62b7d8408
-          cmake -DCMAKE_GENERATOR_PLATFORM=x64 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOPENSSL_NO_ASM=1 .
-          msbuild /m ALL_BUILD.vcxproj /p:Configuration=Release
-          cd ..
-        }
+        brew install ninja
+      shell: bash
+
+    - name: Cache vcpkg
+      id: cache-vcpkg
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/vcpkg
+        key: ${{ runner.os }}-vcpkg-cache-${{ matrix.triplet }}-${{ hashFiles('**/CMakeLists.txt') }}
+
+    - name: Install vcpkg (if cache miss)
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git
+        cd vcpkg
+        ./bootstrap-vcpkg.sh -disableMetrics
+      shell: bash
+
+    - name: Install vcpkg (Windows, if cache miss)
+      if: runner.os == 'Windows' && steps.cache-vcpkg.outputs.cache-hit != 'true'
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git
+        cd vcpkg
+        .\bootstrap-vcpkg.bat -disableMetrics
+      shell: pwsh
+
+    - name: Install vcpkg Dependencies
+      run: |
+        ./vcpkg/vcpkg install zlib:${{ matrix.vcpkg_static_triplet }}
+        ./vcpkg/vcpkg install libevent:${{ matrix.vcpkg_static_triplet }}
+        ./vcpkg/vcpkg install pcre:${{ matrix.vcpkg_static_triplet }}
+        ./vcpkg/vcpkg install getopt:${{ matrix.triplet }}
+      shell: bash
+
+    - name: Build BoringSSL (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: |
+        git clone https://boringssl.googlesource.com/boringssl
+        cd boringssl
+        git checkout cf8d3ad3cea51cf7184307d54f465da62b7d8408
+        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+        cmake --build build --config Release
+      shell: bash
+
+    - name: Build BoringSSL (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        git clone https://boringssl.googlesource.com/boringssl
+        cd boringssl
+        git checkout cf8d3ad3cea51cf7184307d54f465da62b7d8408
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOPENSSL_NO_ASM=1
+        cmake --build build --config Release
+      shell: pwsh
 
     - name: Configure and Build LSQUIC
       run: |
-        cmake -DCMAKE_GENERATOR_PLATFORM=x64 -DBUILD_SHARED_LIBS=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-static -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${{ runner.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DGETOPT_INCLUDE_DIR=${{ runner.workspace }}/vcpkg/installed/x64-windows/include -DGETOPT_LIB=${{ runner.workspace }}/vcpkg/installed/x64-windows/lib/getopt.lib -DBORINGSSL_DIR=${{ github.workspace }}\boringssl .
-        msbuild /m ALL_BUILD.vcxproj /p:Configuration=Release
+        cmake -S . -B build -G "Ninja" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=OFF `
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_static_triplet }} `
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
+          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl
+        cmake --build build --config Release
+      shell: pwsh
+
+    - name: Package Artifacts
+      shell: pwsh
+      run: |
+        $artifactDir = "lsquic-release-${{ matrix.triplet }}"
+        New-Item -ItemType Directory -Path $artifactDir/lib -Force
+        New-Item -ItemType Directory -Path $artifactDir/include -Force
+        New-Item -ItemType Directory -Path $artifactDir/bin -Force
+
+        # Copy LSQUIC, BoringSSL, and vcpkg libraries and headers
+        Copy-Item -Path "build/bin/*lsquic*" -Destination "$artifactDir/lib/" -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/lib/*lsquic*" -Destination "$artifactDir/lib/" -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/" -Recurse -Force
+        Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/" -Recurse -Force
+        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_static_triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -Force
+        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_static_triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -Force -ErrorAction SilentlyContinue
+
+        # Compress artifacts
+        if ("${{ runner.os }}" -eq "Windows") {
+          Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip"
+        } else {
+          tar -czf "${artifactDir}.tar.gz" -C $artifactDir .
+        }
 
     - name: Upload Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: lsquic-artifacts
-        path: |
-          boringssl/crypto/Release/crypto.lib
-          boringssl/ssl/Release/ssl.lib
-          ${{ runner.workspace }}/vcpkg/installed/x64-windows-static/lib/zlib.lib
-          bin/Release/lsquic.lib
+        name: lsquic-release-${{ runner.os }}-${{ matrix.triplet }}
+        path: lsquic-release-${{ matrix.triplet }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+        retention-days: 7
