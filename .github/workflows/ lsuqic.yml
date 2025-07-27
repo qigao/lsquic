@@ -9,7 +9,6 @@ on:
 jobs:
   build:
     strategy:
-      # Do not cancel other jobs in the matrix if one fails
       fail-fast: false
       matrix:
         include:
@@ -31,7 +30,7 @@ jobs:
     - name: Install Go (for BoringSSL build)
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version: 'stable'
 
     - name: Install Build Tools (Linux)
       if: runner.os == 'Linux'
@@ -41,10 +40,10 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install ninja
 
-    # This action sets up the MSVC developer environment (equivalent to vcvars64.bat)
-    - name: Setup MSVC Developer Environment (Windows)
+    # This is the corrected step for setting up the MSVC developer environment on Windows
+    - name: Setup MSVC Developer Command Prompt
       if: runner.os == 'Windows'
-      uses: microsoft/setup-msvc-dev@v2
+      uses: ilammy/msvc-dev-cmd@v1
 
     - name: Cache vcpkg dependencies
       id: cache-vcpkg
@@ -53,21 +52,21 @@ jobs:
         path: ${{ github.workspace }}/vcpkg/installed
         key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-cache
 
-    - name: Bootstrap vcpkg
+    - name: Bootstrap vcpkg (Linux/macOS)
+      if: runner.os != 'Windows' && steps.cache-vcpkg.outputs.cache-hit != 'true'
       run: |
         git clone https://github.com/microsoft/vcpkg.git
         cd vcpkg
         ./bootstrap-vcpkg.sh -disableMetrics
       shell: bash
-      if: runner.os != 'Windows'
 
     - name: Bootstrap vcpkg (Windows)
+      if: runner.os == 'Windows' && steps.cache-vcpkg.outputs.cache-hit != 'true'
       run: |
         git clone https://github.com/microsoft/vcpkg.git
         cd vcpkg
         ./bootstrap-vcpkg.bat -disableMetrics
       shell: cmd
-      if: runner.os == 'Windows'
 
     - name: Install zlib and libevent via vcpkg
       run: |
@@ -80,7 +79,7 @@ jobs:
         git clone https://boringssl.googlesource.com/boringssl
         cd boringssl
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-        # Configure BoringSSL. We disable tests to avoid compiler warnings on newer compilers.
+        # Configure BoringSSL, disabling tests to avoid compiler warnings on newer compilers
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
         # Build BoringSSL
         cmake --build build --config Release
@@ -106,17 +105,15 @@ jobs:
         New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
         New-Item -ItemType Directory -Path "$artifactDir/include" -Force
 
-        # Copy all necessary headers and libraries into the distribution directory
         Copy-Item -Path "include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
         Copy-Item -Path "build/lib/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "build/bin/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/bin/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue # For Windows DLLs
         Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
         Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
         Copy-Item -Path "boringssl/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
         Copy-Item -Path "vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
         Copy-Item -Path "vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
 
-        # Compress the final package
         if ("${{ runner.os }}" -eq "Windows") {
           Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip"
         } else {
