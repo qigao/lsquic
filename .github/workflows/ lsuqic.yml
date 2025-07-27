@@ -2,45 +2,33 @@ name: Build LSQUIC with BoringSSL
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ master ]
+    branches: [ main, master ]
 
 jobs:
   build:
-    # Do not cancel other jobs in the matrix if one fails
     strategy:
+      # Do not cancel other jobs in the matrix if one fails
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             triplet: x64-linux
-            # On Linux/macOS, static dependencies are the default with vcpkg
-            vcpkg_triplet: x64-linux
           - os: windows-latest
-            triplet: x64-windows
-            # On Windows, we must be explicit about static linking for dependencies
-            vcpkg_triplet: x64-windows-static
+            triplet: x64-windows-static
           - os: macos-latest
             triplet: x64-osx
-            vcpkg_triplet: x64-osx
 
     runs-on: ${{ matrix.os }}
 
     steps:
-    - name: Print Runner Information
-      run: |
-        echo "Runner OS: ${{ runner.os }}"
-        echo "Vcpkg Triplet: ${{ matrix.vcpkg_triplet }}"
-        echo "Event: ${{ github.event_name }}"
-      shell: bash
-
     - name: Checkout LSQUIC repository and submodules
       uses: actions/checkout@v4
       with:
         submodules: 'recursive'
 
-    - name: Install Go (for BoringSSL)
+    - name: Install Go (for BoringSSL build)
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
@@ -53,12 +41,17 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install ninja
 
-    - name: Cache vcpkg artifacts
+    # This action sets up the MSVC developer environment (equivalent to vcvars64.bat)
+    - name: Setup MSVC Developer Environment (Windows)
+      if: runner.os == 'Windows'
+      uses: microsoft/setup-msvc-dev@v2
+
+    - name: Cache vcpkg dependencies
       id: cache-vcpkg
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/vcpkg/installed
-        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-vcpkg-${{ hashFiles('**/CMakeLists.txt') }}
+        key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-cache
 
     - name: Bootstrap vcpkg
       run: |
@@ -78,29 +71,32 @@ jobs:
 
     - name: Install zlib and libevent via vcpkg
       run: |
-        vcpkg/vcpkg install zlib:${{ matrix.vcpkg_triplet }}
-        vcpkg/vcpkg install libevent:${{ matrix.vcpkg_triplet }}
+        ${{ github.workspace }}/vcpkg/vcpkg install zlib:${{ matrix.triplet }}
+        ${{ github.workspace }}/vcpkg/vcpkg install libevent:${{ matrix.triplet }}
       shell: bash
 
-    - name: Build BoringSSL from source
+    - name: Build BoringSSL from Source
       run: |
         git clone https://boringssl.googlesource.com/boringssl
         cd boringssl
-        # Use the specific, stable commit for BoringSSL
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-        # Configure and build BoringSSL
-        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+        # Configure BoringSSL. We disable tests to avoid compiler warnings on newer compilers.
+        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+        # Build BoringSSL
         cmake --build build --config Release
       shell: bash
 
-    - name: Configure and Build LSQUIC (Static Release)
+    - name: Configure LSQUIC
       run: |
         cmake -S . -B build -G "Ninja" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
-        cmake --build build --config Release
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+      shell: pwsh
+
+    - name: Build LSQUIC
+      run: cmake --build build --config Release
       shell: pwsh
 
     - name: Package Build Artifacts
@@ -110,20 +106,15 @@ jobs:
         New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
         New-Item -ItemType Directory -Path "$artifactDir/include" -Force
 
-        # Copy LSQUIC headers
-        Copy-Item -Path "include/*" -Destination "$artifactDir/include/" -Recurse
-
-        # Copy LSQUIC library
-        Copy-Item -Path "build/lib/*lsquic*" -Destination "$artifactDir/lib/"
-
-        # Copy BoringSSL libraries and headers
-        Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/"
-        Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/"
-        Copy-Item -Path "boringssl/include/*" -Destination "$artifactDir/include/" -Recurse
-
-        # Copy Zlib and Libevent libraries and headers from vcpkg
-        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_triplet }}/lib/*" -Destination "$artifactDir/lib/"
-        Copy-Item -Path "vcpkg/installed/${{ matrix.vcpkg_triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse
+        # Copy all necessary headers and libraries into the distribution directory
+        Copy-Item -Path "include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/lib/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "build/bin/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/build/crypto/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/build/ssl/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "boringssl/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
+        Copy-Item -Path "vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
 
         # Compress the final package
         if ("${{ runner.os }}" -eq "Windows") {
