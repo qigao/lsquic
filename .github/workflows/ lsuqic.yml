@@ -37,13 +37,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # FIX: The cache has been removed. This job will now reliably build and upload the artifact every time.
       - name: Build and Install BoringSSL
         run: |
           git clone https://boringssl.googlesource.com/boringssl.git
           cd boringssl
+          # Using a known-good commit for stability
           git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
           if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # Remove -Werror to prevent build failures on newer compilers
             sed -i 's/-Werror//g' CMakeLists.txt
           fi
           cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/boringssl-install
@@ -119,13 +120,11 @@ jobs:
         working-directory: ${{ github.workspace }}/lsquic
         run: |
           git submodule update --init --recursive
-          # FIX: Provide EVERY possible variable to satisfy the LSQUIC find script.
+          # FIX: Simplify CMake arguments. LSQUIC's find script can locate
+          # the necessary files using just the BORINGSSL_DIR variable.
           cmake -S . -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DBORINGSSL_DIR=${{ github.workspace }}/boringssl-install `
-            -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl-install/include `
-            -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl-install/lib/libcrypto.a `
-            -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl-install/lib/libssl.a `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
           cmake --build build --config Release
@@ -137,7 +136,7 @@ jobs:
         shell: pwsh
         run: |
           git submodule update --init --recursive
-          # FIX: Provide EVERY possible variable, with Windows library names.
+          # FIX: Provide every possible variable, with Windows library names.
           cmake -S . -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DBORINGSSL_DIR="${{ github.workspace }}/boringssl-install" `
@@ -154,13 +153,17 @@ jobs:
           $artifactDir = "lsquic-dist-${{ matrix.triplet }}"
           New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
           New-Item -ItemType Directory -Path "$artifactDir/include" -Force
+          # Copy binaries and libraries from the LSQUIC build
           Copy-Item -Path "${{ github.workspace }}/lsquic/build/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/lsquic/build/bin/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
-          Copy-Item -Path "${{ github.workspace }}/lsquic/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
-          Copy-Item -Path "${{ github.workspace }}/boringssl-install/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
-          Copy-Item -Path "${{ github.workspace }}/boringssl-install/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
+          # Copy public headers from LSQUIC source
+          Copy-Item -Path "${{ github.workspace }}/lsquic/include/*" -Destination "$artifactDir/include/" -Recurse
+          # Copy BoringSSL libraries and headers
+          Copy-Item -Path "${{ github.workspace }}/boringssl-install/lib/*" -Destination "$artifactDir/lib/" -Recurse
+          Copy-Item -Path "${{ github.workspace }}/boringssl-install/include/*" -Destination "$artifactDir/include/" -Recurse
+          # Copy vcpkg dependency libraries and headers
           Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
-          Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
+          Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse
           
           Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip" -Force
 
