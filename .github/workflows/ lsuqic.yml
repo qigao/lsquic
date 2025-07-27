@@ -8,7 +8,7 @@ on:
 
 jobs:
   # =============================================
-  #  JOB 1: Build and Cache/Archive BoringSSL
+  #  JOB 1: Build and Archive BoringSSL
   # =============================================
   build-boringssl:
     strategy:
@@ -16,8 +16,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    outputs:
-      cache-hit: ${{ steps.cache-boringssl.outputs.cache-hit }}
     steps:
       - name: Install Go
         uses: actions/setup-go@v5
@@ -39,18 +37,8 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # FIX: Cache the BoringSSL install directory.
-      - name: Cache BoringSSL build
-        id: cache-boringssl
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/boringssl-install
-          # The key is based on the OS and a hash of this workflow file.
-          key: boringssl-build-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
-
-      # FIX: Only run the build if the cache was not found.
+      # FIX: The cache has been removed. This job will now reliably build and upload the artifact every time.
       - name: Build and Install BoringSSL
-        if: steps.cache-boringssl.outputs.cache-hit != 'true'
         run: |
           git clone https://boringssl.googlesource.com/boringssl.git
           cd boringssl
@@ -114,25 +102,51 @@ jobs:
       - name: Bootstrap and Install vcpkg Dependencies
         working-directory: ${{ github.workspace }}/vcpkg
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            ./bootstrap-vcpkg.bat -disableMetrics
-          else
-            ./bootstrap-vcpkg.sh -disableMetrics
-          fi
+          ./bootstrap-vcpkg.sh -disableMetrics
           ./vcpkg install getopt:${{ matrix.triplet }} zlib:${{ matrix.triplet }} libevent:${{ matrix.triplet }}
+        if: runner.os != 'Windows'
         shell: bash
+      - name: Bootstrap and Install vcpkg Dependencies (Windows)
+        working-directory: ${{ github.workspace }}/vcpkg
+        run: |
+          ./bootstrap-vcpkg.bat -disableMetrics
+          ./vcpkg install getopt:${{ matrix.triplet }} zlib:${{ matrix.triplet }} libevent:${{ matrix.triplet }}
+        if: runner.os == 'Windows'
+        shell: cmd
 
-      - name: Configure and Build LSQUIC
+      - name: Configure and Build LSQUIC (Linux/macOS)
+        if: runner.os != 'Windows'
         working-directory: ${{ github.workspace }}/lsquic
         run: |
           git submodule update --init --recursive
+          # FIX: Provide EVERY possible variable to satisfy the LSQUIC find script.
           cmake -S . -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DBORINGSSL_DIR=${{ github.workspace }}/boringssl-install `
+            -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl-install/include `
+            -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl-install/lib/libcrypto.a `
+            -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl-install/lib/libssl.a `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
           cmake --build build --config Release
         shell: bash
+
+      - name: Configure and Build LSQUIC (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}/lsquic
+        shell: pwsh
+        run: |
+          git submodule update --init --recursive
+          # FIX: Provide EVERY possible variable, with Windows library names.
+          cmake -S . -B build -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBORINGSSL_DIR="${{ github.workspace }}/boringssl-install" `
+            -DBORINGSSL_INCLUDE_DIR="${{ github.workspace }}/boringssl-install/include" `
+            -DBORINGSSL_LIB_crypto="${{ github.workspace }}/boringssl-install/lib/crypto.lib" `
+            -DBORINGSSL_LIB_ssl="${{ github.workspace }}/boringssl-install/lib/ssl.lib" `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}"
+          cmake --build build --config Release
 
       - name: Package Final LSQUIC Artifacts
         shell: pwsh
@@ -147,15 +161,11 @@ jobs:
           Copy-Item -Path "${{ github.workspace }}/boringssl-install/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
-
-          if ("${{ runner.os }}" -eq "Windows") {
-            Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip"
-          } else {
-            tar -czf "${artifactDir}.tar.gz" -C $artifactDir .
-          }
+          
+          Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip" -Force
 
       - name: Upload Final LSQUIC Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: lsquic-release-${{ matrix.triplet }}
-          path: lsquic-dist-${{ matrix.triplet }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          path: lsquic-dist-${{ matrix.triplet }}.zip
