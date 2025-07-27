@@ -83,9 +83,10 @@ jobs:
       working-directory: ${{ github.workspace }}/lsquic
       run: |
         git submodule update --init --recursive
-        # FIX: Explicitly provide the full paths to the BoringSSL libraries and includes
+        # FIX: Provide BOTH the high-level BORINGSSL_DIR and the specific library/include paths for maximum compatibility.
         cmake -S . -B build -G "Ninja" `
           -DCMAKE_BUILD_TYPE=Release `
+          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
           -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl/include `
           -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl/build/crypto/libcrypto.a `
           -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl/build/ssl/libssl.a `
@@ -97,13 +98,13 @@ jobs:
     - name: Configure and Build LSQUIC (Windows)
       if: runner.os == 'Windows'
       working-directory: ${{ github.workspace }}/lsquic
-      # FIX: Use PowerShell on Windows to correctly handle paths and the MSVC environment
       shell: pwsh
       run: |
         git submodule update --init --recursive
-        # FIX: Explicitly provide the full paths to the BoringSSL libraries and includes
+        # FIX: Provide BOTH the high-level BORINGSSL_DIR and the specific library/include paths for maximum compatibility.
         cmake -S . -B build -G "Ninja" `
           -DCMAKE_BUILD_TYPE=Release `
+          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
           -DBORINGSSL_INCLUDE_DIR=${{ github.workspace }}/boringssl/include `
           -DBORINGSSL_LIB_crypto=${{ github.workspace }}/boringssl/build/crypto/crypto.lib `
           -DBORINGSSL_LIB_ssl=${{ github.workspace }}/boringssl/build/ssl/ssl.lib `
