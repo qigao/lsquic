@@ -8,19 +8,18 @@ on:
 
 jobs:
   # =============================================
-  #  JOB 1: Build and Archive BoringSSL
+  #  JOB 1: Build and Cache/Archive BoringSSL
   # =============================================
   build-boringssl:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-          - os: windows-latest
-          - os: macos-latest
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    outputs:
+      cache-hit: ${{ steps.cache-boringssl.outputs.cache-hit }}
     steps:
-      - name: Install Go (for BoringSSL build)
+      - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
@@ -36,11 +35,22 @@ jobs:
       - name: Install NASM (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
-      - name: Setup MSVC Developer Command Prompt (Windows)
+      - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # FIX: Cache the BoringSSL install directory.
+      - name: Cache BoringSSL build
+        id: cache-boringssl
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/boringssl-install
+          # The key is based on the OS and a hash of this workflow file.
+          key: boringssl-build-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+
+      # FIX: Only run the build if the cache was not found.
       - name: Build and Install BoringSSL
+        if: steps.cache-boringssl.outputs.cache-hit != 'true'
         run: |
           git clone https://boringssl.googlesource.com/boringssl.git
           cd boringssl
@@ -53,23 +63,11 @@ jobs:
           cmake --install build
         shell: bash
 
-      - name: Package BoringSSL Artifact
-        shell: pwsh
-        run: |
-          # to create a path string that Compress-Archive understands perfectly.
-          $sourcePath = "${{ github.workspace }}/boringssl-install"
-          if ("${{ runner.os }}" -eq "Windows") {
-            $sourcePath = $sourcePath.Replace('/', '\')
-            Compress-Archive -Path $sourcePath -DestinationPath boringssl.zip
-          } else {
-            tar -czf boringssl.tar.gz -C $sourcePath .
-          }
-
       - name: Upload BoringSSL Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: boringssl-artifact-${{ matrix.os }}
-          path: boringssl.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          name: boringssl-artifact-${{ runner.os }}
+          path: ${{ github.workspace }}/boringssl-install
 
   # ==================================================
   #  JOB 2: Build LSQUIC using the BoringSSL Artifact
@@ -97,23 +95,15 @@ jobs:
             brew install git ninja
           fi
         shell: bash
-      - name: Setup MSVC Developer Command Prompt (Windows)
+      - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download and Extract BoringSSL Artifact
+      - name: Download BoringSSL Artifact
         uses: actions/download-artifact@v4
         with:
-          name: boringssl-artifact-${{ matrix.os }}
-      - name: Decompress Artifact
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path boringssl-install
-          if ("${{ runner.os }}" -eq "Windows") {
-            Expand-Archive -Path boringssl.zip -DestinationPath boringssl-install
-          } else {
-            tar -xzf boringssl.tar.gz -C boringssl-install
-          }
+          name: boringssl-artifact-${{ runner.os }}
+          path: boringssl-install
 
       - name: Clone LSQUIC and vcpkg
         run: |
@@ -157,7 +147,7 @@ jobs:
           Copy-Item -Path "${{ github.workspace }}/boringssl-install/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/lib/*" -Destination "$artifactDir/lib/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item -Path "${{ github.workspace }}/vcpkg/installed/${{ matrix.triplet }}/include/*" -Destination "$artifactDir/include/" -Recurse -ErrorAction SilentlyContinue
-          
+
           if ("${{ runner.os }}" -eq "Windows") {
             Compress-Archive -Path $artifactDir -DestinationPath "${artifactDir}.zip"
           } else {
