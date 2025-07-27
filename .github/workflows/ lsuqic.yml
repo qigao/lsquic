@@ -32,74 +32,64 @@ jobs:
       with:
         go-version: 'stable'
 
-    - name: Install Build Tools (Linux)
-      if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y ninja-build
+    - name: Install Build Tools (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: |
+        if [[ "${{ runner.os }}" == "Linux" ]]; then
+          sudo apt-get update && sudo apt-get install -y ninja-build
+        elif [[ "${{ runner.os }}" == "macOS" ]]; then
+          brew install ninja
+        fi
+      shell: bash
 
-    - name: Install Build Tools (macOS)
-      if: runner.os == 'macOS'
-      run: brew install ninja
-
-    # This is the corrected step for setting up the MSVC developer environment on Windows
-    - name: Setup MSVC Developer Command Prompt
+    - name: Setup MSVC Developer Command Prompt (Windows)
       if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Cache vcpkg dependencies
+    - name: Cache vcpkg
       id: cache-vcpkg
       uses: actions/cache@v4
       with:
-        path: ${{ github.workspace }}/vcpkg/installed
-        key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-cache
+        path: ${{ github.workspace }}/vcpkg
+        key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-cache-v2
 
-    - name: Bootstrap vcpkg (Linux/macOS)
-      if: runner.os != 'Windows' && steps.cache-vcpkg.outputs.cache-hit != 'true'
+    - name: Bootstrap vcpkg
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
       run: |
         git clone https://github.com/microsoft/vcpkg.git
         cd vcpkg
-        ./bootstrap-vcpkg.sh -disableMetrics
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          ./bootstrap-vcpkg.bat -disableMetrics
+        else
+          ./bootstrap-vcpkg.sh -disableMetrics
+        fi
       shell: bash
 
-    - name: Bootstrap vcpkg (Windows)
-      if: runner.os == 'Windows' && steps.cache-vcpkg.outputs.cache-hit != 'true'
+    - name: Install Dependencies via vcpkg
       run: |
-        git clone https://github.com/microsoft/vcpkg.git
-        cd vcpkg
-        ./bootstrap-vcpkg.bat -disableMetrics
-      shell: cmd
-
-    - name: Install zlib and libevent via vcpkg
-      run: |
-        ${{ github.workspace }}/vcpkg/vcpkg install zlib:${{ matrix.triplet }}
-        ${{ github.workspace }}/vcpkg/vcpkg install libevent:${{ matrix.triplet }}
+        ./vcpkg/vcpkg install zlib:${{ matrix.triplet }}
+        ./vcpkg/vcpkg install libevent:${{ matrix.triplet }}
       shell: bash
 
-    - name: Build BoringSSL from Source
+    - name: Build BoringSSL from Source (Disable Tests)
       run: |
         git clone https://boringssl.googlesource.com/boringssl
         cd boringssl
         git checkout 9fc1c33e9c21439ce5f87855a6591a9324e569fd
-        # Configure BoringSSL, disabling tests to avoid compiler warnings on newer compilers
+        # FIX: Disable tests with -DBUILD_TESTING=OFF to prevent the gcc warning from failing the build.
         cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-        # Build BoringSSL
         cmake --build build --config Release
       shell: bash
 
-    - name: Configure LSQUIC
+    - name: Configure and Build LSQUIC
+      # FIX: Use bash shell for all OSes for command consistency.
+      # FIX: Use single-line, explicit commands to avoid syntax errors.
       run: |
-        cmake -S . -B build -G "Ninja" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DBORINGSSL_DIR=${{ github.workspace }}/boringssl `
-          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-      shell: pwsh
-
-    - name: Build LSQUIC
-      run: cmake --build build --config Release
-      shell: pwsh
+        cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBORINGSSL_DIR=${{ github.workspace }}/boringssl -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+        cmake --build build --config Release
+      shell: bash
 
     - name: Package Build Artifacts
-      shell: pwsh
       run: |
         $artifactDir = "lsquic-dist-${{ matrix.triplet }}"
         New-Item -ItemType Directory -Path "$artifactDir/lib" -Force
@@ -119,6 +109,7 @@ jobs:
         } else {
           tar -czf "${artifactDir}.tar.gz" -C $artifactDir .
         }
+      shell: pwsh
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
